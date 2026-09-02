@@ -10,16 +10,27 @@ Full disclosure - this has been coded with claude (and tested) - and sorry for t
 
 In home assistant i'm doing the following:
 
-    - name: "Gewenst overschot Nymo"
+ - name: "Gewenst overschot Nymo"
       unique_id: gewenst_overschot_nymo
       unit_of_measurement: W
+      device_class: power
       state_class: measurement
+      availability: >
+        {{ has_value('sensor.anker_solix_device_192_168_4_148_afnemend_vermogen_van_het_net')
+           and has_value('sensor.anker_solix_device_192_168_4_148_teruggeleverd_vermogen_aan_het_net')
+           and has_value('sensor.anker_solix_device_192_168_4_148_ontlaadvermogen_van_de_batterij') }}
       state: >
-          {% set afnemend_net = states('sensor.anker_solix_device_192_168_4_148_afnemend_vermogen_van_het_net') | float(0) %}
-          {% set geleverd_batt = states('sensor.anker_solix_device_192_168_4_148_ontlaadvermogen_van_de_batterij') | float(0) %}
-          {% set teruggeleverd_net = states('sensor.anker_solix_device_192_168_4_148_teruggeleverd_vermogen_aan_het_net') | float(0) %}
-          {% set boost = states('input_number.nymo_boost') | float(0) %}
-          {{ (teruggeleverd_net - afnemend_net - geleverd_batt + boost) | round(0) }}
+        {% set afnemend_net = states('sensor.anker_solix_device_192_168_4_148_afnemend_vermogen_van_het_net') | float(0) %}
+        {% set teruggeleverd_net = states('sensor.anker_solix_device_192_168_4_148_teruggeleverd_vermogen_aan_het_net') | float(0) %}
+        {% set geleverd_batt = states('sensor.anker_solix_device_192_168_4_148_ontlaadvermogen_van_de_batterij') | float(0) %}
+        {% set lading = states('sensor.anker_solix_device_192_168_4_148_laadvermogen_van_de_batterij') | float(0) %}
+        {% set nymo_eerst = is_state('input_boolean.nymo_eerst', 'on') %}
+        {% set nymo_max = states('input_number.nymo_max') | float(3000) %}
+        {% set boiler = states('sensor.boiler_vermogen') | float(none) %}
+        {% set boost = states('input_number.nymo_boost') | float(0) if boiler is not none else 0 %}
+        {% set cap = (nymo_max - boiler) if boiler is not none else 99999 %}
+        {% set overschot = teruggeleverd_net - afnemend_net - geleverd_batt + (lading if nymo_eerst else 0) + boost %}
+        {{ ([overschot, cap] | min) | round(0) }}
 
 And a number helper to put the boost number in.
 
