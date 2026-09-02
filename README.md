@@ -6,6 +6,8 @@ I've recently added a battery in my household and the Nymo Solyx cannot (from th
 This is a first proof of concept of an ESP32 that sends P1 events to the wireless transmitter of a Nymo Solyx.
 This way, you can influence the events from ESPHOME/Home Assistant and include the battery in your calculation so it is not charging your Nymo with power from your battery.
 
+Full disclosure - this has been coded with claude (and tested) - and sorry for the Dutch.
+
 In home assistant i'm doing the following:
 
     - name: "Gewenst overschot Nymo"
