@@ -1,0 +1,301 @@
+# Nymo feeder v5 · YAML
+# P1-telegramgenerator voor de Solyx Nymo sensorbox — productieversie
+#
+# Gebouwd op het echte telegram van XMX----7217 (DSMR 4.2).
+# CRC-algoritme en byte-indeling geverifieerd: 834 bytes t/m '!' geeft 2B8C.
+# Getest en werkend met een YouLess LS120 en de Solyx sensorbox.
+#
+# De ESP leest niets van de meter. Hij krijgt via de HA-API één getal
+# binnen -- het gewenste overschot in watt, berekend in HA -- en giet dat
+# in een geldig telegram. Valt HA of de sensor weg, dan meldt hij 1000 W
+# afname zodat de Nymo uitgaat.
+#
+# Bediening vanuit HA:
+#   Nymo zendinterval   -- ritme in seconden
+#   Nymo remmen         -- aan: stuur 1000 W afname, Nymo gaat uit
+#   Nymo feeder pauze   -- aan: zwijg volledig (alsof de kabel eruit is)
+#
+# Alles staat op fase 2 en de totalen zijn gesaldeerd (nooit afname en
+# teruglevering tegelijk), zodat een Nymo die naar de totalen kijkt en
+# een Nymo die naar fase 2 kijkt hetzelfde getal zien.
+#
+# Hardware (open collector, zoals een echte meter):
+#   GPIO17 -> 1k -> basis 2N3904
+#   emitter 2N3904 -> GND
+#   collector 2N3904 -> pin 5 RJ12, met 10k van pin 5 naar +5V
+#   pin 1 RJ12 -> +5V uit eigen voeding
+#   pin 3 en 6 RJ12 -> GND
+#   pin 2 RJ12 -> niet aangesloten
+#   Alle massa's (USB, ESP, RJ12) aan elkaar.
+ 
+esphome:
+  name: nymo-feeder
+ 
+esp32:
+  board: esp32dev
+  framework:
+    type: esp-idf
+ 
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+ 
+logger:
+  level: INFO
+ 
+api:
+  id: ha_api
+  encryption:
+    key: !secret api_key
+ 
+ota:
+  - platform: esphome
+ 
+# Tellerstanden worden bewaard; niet vaker wegschrijven dan nodig.
+preferences:
+  flash_write_interval: 5min
+ 
+# SNTP in plaats van HA-tijd: de failsafe moet ook werken als HA weg is.
+time:
+  - platform: sntp
+    id: ha_time
+    timezone: Europe/Amsterdam
+ 
+uart:
+  # De transistor inverteert, dus hier niet nog eens. Gewone push-pull.
+  - id: p1_out
+    tx_pin:
+      number: GPIO17
+      inverted: false
+    baud_rate: 115200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+ 
+globals:
+  # true = loopt op echte data uit HA, false = failsafe/rem/pauze actief
+  - id: healthy
+    type: bool
+    restore_value: false
+    initial_value: "false"
+ 
+  # Moment van het laatste telegram, voor het instelbare zendritme.
+  - id: last_send
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+ 
+  # Verstreken tijd tussen twee telegrammen, voor de tellers.
+  - id: last_ms
+    type: uint32_t
+    restore_value: false
+    initial_value: "0"
+ 
+  # Cumulatieve standen, startwaarden uit de opname. Tarief 2 is actief
+  # (0-0:96.14.0(0002)), dus alleen deze twee lopen op.
+  - id: kwh_in
+    type: double
+    restore_value: true
+    initial_value: "51196.615"
+ 
+  - id: kwh_out
+    type: double
+    restore_value: true
+    initial_value: "18368.178"
+ 
+sensor:
+  # Berekend in HA:
+  #   teruggeleverd_net - afnemend_net - ontlading_batterij + boost
+  - platform: homeassistant
+    id: wanted_surplus
+    entity_id: sensor.gewenst_overschot_nymo
+    internal: true
+ 
+  - platform: template
+    name: "Nymo doorgegeven overschot"
+    id: nymo_surplus
+    unit_of_measurement: W
+    device_class: power
+    state_class: measurement
+    accuracy_decimals: 0
+ 
+number:
+  # Zendritme, instelbaar vanuit HA zonder te flashen. Sneller dan de
+  # poll-interval van je Anker-sensoren heeft geen zin; de Nymo heeft
+  # bovendien zijn eigen rampsnelheid.
+  - platform: template
+    name: "Nymo zendinterval"
+    id: send_interval
+    optimistic: true
+    restore_value: true
+    initial_value: 10
+    min_value: 1
+    max_value: 60
+    step: 1
+    unit_of_measurement: s
+    mode: box
+    entity_category: config
+ 
+switch:
+  # Schakelaars, geen knoppen: één telegram doet niets, de Nymo heeft de
+  # waarde een tijdje nodig. Na een herstart staan ze altijd uit, zodat
+  # een reboot nooit een vergeten rem of pauze achterlaat.
+ 
+  # Aan: stuur 1000 W afname, ongeacht wat HA zegt. Nymo bouwt af.
+  - platform: template
+    name: "Nymo remmen"
+    id: sw_brake
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    icon: mdi:car-brake-alert
+ 
+  # Aan: geen telegrammen meer. Voor de sensorbox is het alsof de kabel
+  # eruit is. Wat de Nymo dan doet is aan de Nymo.
+  - platform: template
+    name: "Nymo feeder pauze"
+    id: sw_pause
+    optimistic: true
+    restore_mode: ALWAYS_OFF
+    icon: mdi:pause-circle
+    on_turn_on:
+      - lambda: |-
+          id(healthy) = false;
+          id(last_ms) = 0;
+ 
+binary_sensor:
+  - platform: template
+    name: "Nymo feeder op echte data"
+    device_class: connectivity
+    lambda: 'return id(healthy);'
+ 
+button:
+  - platform: template
+    name: "Nymo tellers herstellen"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          id(kwh_in) = 51196.615;
+          id(kwh_out) = 18368.178;
+ 
+interval:
+  - interval: 1s
+    then:
+      - lambda: |-
+          // --- pauze: helemaal niets doen -------------------------------
+          if (id(sw_pause).state) return;
+ 
+          // --- zendritme ------------------------------------------------
+          uint32_t ms = millis();
+          uint32_t period = (uint32_t)(id(send_interval).state * 1000.0f);
+          if (period < 1000) period = 1000;
+          if (ms - id(last_send) < period) return;
+          id(last_send) = ms;
+ 
+          // --- waarde bepalen, altijd -----------------------------------
+          float x;
+          bool ok = id(ha_api)->is_connected() &&
+                    id(wanted_surplus).has_state() &&
+                    !std::isnan(id(wanted_surplus).state);
+          if (ok) {
+            x = id(wanted_surplus).state;     // W, positief = overschot
+          } else {
+            x = -1000.0f;                     // failsafe: Nymo gaat uit
+          }
+          if (id(sw_brake).state) {
+            x = -1000.0f;                     // handmatig remmen
+            ok = false;
+          }
+          id(healthy) = ok;
+ 
+          auto now = id(ha_time).now();
+          if (!now.is_valid()) return;        // wachten op SNTP na boot
+ 
+          if (x > 17000) x = 17000;
+          if (x < -17000) x = -17000;
+          id(nymo_surplus).publish_state(x);
+ 
+          float exp_kw = x > 0 ?  x / 1000.0f : 0.0f;
+          float imp_kw = x < 0 ? -x / 1000.0f : 0.0f;
+          int amps = (int) (fabsf(x) / 230.0f + 0.5f);
+          if (amps > 999) amps = 999;
+ 
+          // --- tellers bijwerken over de echt verstreken tijd -----------
+          if (id(last_ms) != 0) {
+            double hours = (double)(ms - id(last_ms)) / 3600000.0;
+            if (hours > 0 && hours < 0.05) {
+              id(kwh_in)  += imp_kw * hours;
+              id(kwh_out) += exp_kw * hours;
+            }
+          }
+          id(last_ms) = ms;
+ 
+          // --- tijdstempels ---------------------------------------------
+          char ts[16];
+          snprintf(ts, sizeof(ts), "%02d%02d%02d%02d%02d%02d%c",
+                   now.year % 100, now.month, now.day_of_month,
+                   now.hour, now.minute, now.second,
+                   now.is_dst ? 'S' : 'W');
+ 
+          char gts[16];
+          snprintf(gts, sizeof(gts), "%02d%02d%02d%02d0000%c",
+                   now.year % 100, now.month, now.day_of_month,
+                   now.hour, now.is_dst ? 'S' : 'W');
+ 
+          // --- telegram -------------------------------------------------
+          char t[1200];
+          int n = snprintf(t, sizeof(t),
+            "/XMX5LGBBFG1012737217\r\n"
+            "\r\n"
+            "1-3:0.2.8(42)\r\n"
+            "0-0:1.0.0(%s)\r\n"
+            "0-0:96.1.1(4530303330303033373630383336353136)\r\n"
+            "1-0:1.8.1(054511.665*kWh)\r\n"
+            "1-0:1.8.2(%010.3f*kWh)\r\n"
+            "1-0:2.8.1(007292.109*kWh)\r\n"
+            "1-0:2.8.2(%010.3f*kWh)\r\n"
+            "0-0:96.14.0(0002)\r\n"
+            "1-0:1.7.0(%06.3f*kW)\r\n"
+            "1-0:2.7.0(%06.3f*kW)\r\n"
+            "0-0:96.7.21(00006)\r\n"
+            "0-0:96.7.9(00001)\r\n"
+            "1-0:99.97.0(1)(0-0:96.7.19)(190210201018W)(0000005510*s)\r\n"
+            "1-0:32.32.0(00001)\r\n"
+            "1-0:52.32.0(00000)\r\n"
+            "1-0:72.32.0(00000)\r\n"
+            "1-0:32.36.0(00247)\r\n"
+            "1-0:52.36.0(12406)\r\n"
+            "1-0:72.36.0(00091)\r\n"
+            "0-0:96.13.1()\r\n"
+            "0-0:96.13.0()\r\n"
+            "1-0:31.7.0(000*A)\r\n"
+            "1-0:51.7.0(%03d*A)\r\n"
+            "1-0:71.7.0(000*A)\r\n"
+            "1-0:21.7.0(00.000*kW)\r\n"
+            "1-0:41.7.0(%06.3f*kW)\r\n"
+            "1-0:61.7.0(00.000*kW)\r\n"
+            "1-0:22.7.0(00.000*kW)\r\n"
+            "1-0:42.7.0(%06.3f*kW)\r\n"
+            "1-0:62.7.0(00.000*kW)\r\n"
+            "0-1:24.1.0(003)\r\n"
+            "0-1:96.1.0(4730303332353631323837393232363137)\r\n"
+            "0-1:24.2.1(%s)(09142.780*m3)\r\n"
+            "!",
+            ts, id(kwh_in), id(kwh_out), imp_kw, exp_kw,
+            amps, imp_kw, exp_kw, gts);
+ 
+          if (n <= 0 || n >= (int) sizeof(t)) return;
+ 
+          // --- CRC16/ARC over alles vanaf '/' tot en met '!' ------------
+          uint16_t crc = 0;
+          for (int i = 0; i < n; i++) {
+            crc ^= (uint8_t) t[i];
+            for (int b = 0; b < 8; b++)
+              crc = (crc & 1) ? (uint16_t)((crc >> 1) ^ 0xA001)
+                              : (uint16_t)(crc >> 1);
+          }
+          char tail[8];
+          snprintf(tail, sizeof(tail), "%04X\r\n", crc);
+ 
+          id(p1_out).write_array((const uint8_t *) t, n);
+          id(p1_out).write_array((const uint8_t *) tail, strlen(tail));
+ 
